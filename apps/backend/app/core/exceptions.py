@@ -70,6 +70,13 @@ class ConfigurationError(AppError):
     code = "misconfigured"
 
 
+class CredentialUndecryptableError(AppError):
+    """A stored provider key cannot be read with the current encryption secret."""
+
+    status_code = 400
+    code = "credential_undecryptable"
+
+
 class ExternalServiceError(AppError):
     status_code = 502
     code = "external_service_error"

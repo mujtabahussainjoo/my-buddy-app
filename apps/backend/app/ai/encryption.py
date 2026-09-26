@@ -8,6 +8,7 @@ import hashlib
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.core.config import settings
+from app.core.exceptions import CredentialUndecryptableError
 
 _salt = b"myaibuddy-key-salt-v1"
 
@@ -28,7 +29,12 @@ def decrypt_secret(blob: bytes | None) -> str:
     try:
         return _fernet().decrypt(blob).decode()
     except InvalidToken as exc:
-        raise ValueError("Unable to decrypt stored credential (key changed?)") from exc
+        # Usually JWT_SECRET_KEY changed, so every saved key is now unreadable.
+        # This is fixable by re-entering the key, so it must not look like a crash.
+        raise CredentialUndecryptableError(
+            "This provider's saved API key can no longer be read, because the server's "
+            "encryption secret changed. Please re-enter the API key in Settings."
+        ) from exc
 
 
 def fingerprint(plaintext: str) -> str:

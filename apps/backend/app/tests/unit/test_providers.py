@@ -69,3 +69,92 @@ def test_skip_reason_openai_missing_key() -> None:
     assert _skip_reason("openai", api_key="", base_url="") == (
         "OpenAI is enabled but no API key is configured"
     )
+
+
+def test_a_key_encrypted_with_another_secret_raises_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A changed JWT_SECRET_KEY must produce an actionable message, not a crash."""
+    from app.ai import encryption
+    from app.core.config import settings
+    from app.core.exceptions import CredentialUndecryptableError
+
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", "secret-number-one")
+    blob = encryption.encrypt_secret("sk-secret-123")
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", "secret-number-two")
+
+    with pytest.raises(CredentialUndecryptableError) as caught:
+        encryption.decrypt_secret(blob)
+
+    assert "re-enter" in caught.value.message
+    assert caught.value.status_code == 400
+    assert caught.value.code == "credential_undecryptable"
+
+
+def test_an_unreadable_key_is_skipped_instead_of_breaking_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One corrupt credential must not take chat down; the next provider is used."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from app.core.config import settings
+    from app.services import providers
+
+    unreadable = SimpleNamespace(
+        provider="openai",
+        encrypted_api_key=b"garbage-that-was-encrypted-with-another-key",
+        base_url=None,
+        enabled=True,
+        fallback_order=0,
+        model_chat=None,
+    )
+    mock_row = SimpleNamespace(
+        provider="mock",
+        encrypted_api_key=None,
+        base_url=None,
+        enabled=True,
+        fallback_order=1,
+        model_chat=None,
+    )
+
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", "secret-number-two")
+    scalars = MagicMock()
+    scalars.all.return_value = [unreadable, mock_row]
+    result = MagicMock()
+    result.scalars.return_value = scalars
+
+    class Session:
+        async def execute(self, *_args: object, **_kwargs: object) -> MagicMock:
+            return result
+
+    resolved = asyncio.run(
+        providers.resolve_provider(Session(), preferred=None, model=None)  # type: ignore[arg-type]
+    )
+
+    assert resolved.name == "mock", "should fall through to the mock provider"
+
+
+def test_dev_secret_is_stable_across_restarts(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    """A generated secret must be reused, or every saved key breaks on restart."""
+    from app.core import config
+
+    secret_file = tmp_path / "dev-jwt-secret"  # type: ignore[operator]
+    monkeypatch.setattr(config, "DEV_SECRET_FILE", secret_file)
+
+    first = config._load_or_create_dev_secret()
+    second = config._load_or_create_dev_secret()
+
+    assert first == second
+    assert len(first) > 32
+    assert secret_file.read_text(encoding="utf-8").strip() == first
+
+
+def test_an_existing_dev_secret_file_is_reused(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
+    from app.core import config
+
+    secret_file = tmp_path / "dev-jwt-secret"  # type: ignore[operator]
+    secret_file.write_text("already-set-secret\n", encoding="utf-8")
+    monkeypatch.setattr(config, "DEV_SECRET_FILE", secret_file)
+
+    assert config._load_or_create_dev_secret() == "already-set-secret"

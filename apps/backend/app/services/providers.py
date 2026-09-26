@@ -13,6 +13,7 @@ from app.ai.base import AIProviderError
 from app.ai.encryption import decrypt_secret, encrypt_secret, fingerprint
 from app.ai.registry import build_provider, list_provider_names, provider_meta, provider_meta_with_guidance
 from app.core.config import settings
+from app.core.exceptions import CredentialUndecryptableError
 from app.core.logging import logger
 from app.db.models import ProviderCredential
 from app.schemas.providers import ProviderStatus, ProviderUpdateRequest, ResolvedProvider
@@ -376,9 +377,25 @@ async def resolve_provider(
     )
     mock_fallback: ProviderCredential | None = None
     for row in rows:
-        api_key = (
-            decrypt_secret(row.encrypted_api_key) if row.encrypted_api_key else _env_api_key(row.provider)
-        )
+        try:
+            api_key = (
+                decrypt_secret(row.encrypted_api_key)
+                if row.encrypted_api_key
+                else _env_api_key(row.provider)
+            )
+        except CredentialUndecryptableError:
+            # One unreadable key must not take down chat for everyone; skip it
+            # and keep looking, exactly like a provider with no key at all.
+            logger.warning(
+                "provider_key_unreadable",
+                extra={
+                    "extra_fields": {
+                        "provider": row.provider,
+                        "action": "re-enter the API key in Settings",
+                    }
+                },
+            )
+            continue
         if _is_usable_for_chat(row.provider, api_key=api_key, base_url=row.base_url or ""):
             if row.provider == "mock":
                 mock_fallback = row
@@ -432,11 +449,19 @@ async def build_resolved(
     row = (
         await session.execute(select(ProviderCredential).where(ProviderCredential.provider == resolved.name))
     ).scalar_one_or_none()
-    api_key = (
-        decrypt_secret(row.encrypted_api_key)
-        if row and row.encrypted_api_key
-        else _env_api_key(resolved.name)
-    )
+    try:
+        api_key = (
+            decrypt_secret(row.encrypted_api_key)
+            if row and row.encrypted_api_key
+            else _env_api_key(resolved.name)
+        )
+    except CredentialUndecryptableError:
+        # resolve_provider already skipped these; reaching here means the caller
+        # explicitly asked for this provider, so say what to do about it.
+        raise CredentialUndecryptableError(
+            f"The saved API key for {resolved.name} can no longer be read. "
+            "Please re-enter it in Settings."
+        ) from None
     base_url = row.base_url if row and row.base_url else ""
     instance = build_provider(resolved.name, api_key=api_key, base_url=base_url, model=resolved.model)
     return instance, resolved.name

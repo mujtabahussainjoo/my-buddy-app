@@ -7,7 +7,9 @@ values are never logged; only presence/mask status is reported.
 from __future__ import annotations
 
 import secrets
+import sys
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote_plus
 
@@ -15,6 +17,36 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 AppEnv = Literal["development", "test", "production"]
+
+DEV_SECRET_FILE = Path("var") / "secrets" / "jwt-secret"
+
+
+def _load_or_create_dev_secret() -> str:
+    """Return a stable development secret, creating one only on first run.
+
+    This secret also encrypts stored provider API keys, so a brand new random
+    value on every restart would make every saved key undecryptable and log
+    everyone out. It is persisted instead, and a warning is printed so nobody
+    mistakes it for a real secret.
+    """
+    try:
+        if DEV_SECRET_FILE.is_file():
+            existing = DEV_SECRET_FILE.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        generated = secrets.token_urlsafe(48)
+        DEV_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DEV_SECRET_FILE.write_text(generated, encoding="utf-8")
+        print(
+            f"[config] JWT_SECRET_KEY was empty; generated one and saved it to "
+            f"{DEV_SECRET_FILE}. Set JWT_SECRET_KEY in .env for real deployments.",
+            file=sys.stderr,
+        )
+        return generated
+    except OSError:
+        # Read-only filesystem (some containers): fall back to a per-process
+        # secret rather than crashing at import time.
+        return secrets.token_urlsafe(48)
 
 
 class Settings(BaseSettings):
@@ -102,7 +134,14 @@ class Settings(BaseSettings):
     def _finalize(self) -> Settings:
         if self.APP_ENV != "test" and not self.JWT_SECRET_KEY:
             # Development convenience only; production must set a real secret.
-            self.JWT_SECRET_KEY = secrets.token_urlsafe(48)
+            self.JWT_SECRET_KEY = _load_or_create_dev_secret()
+            if self.APP_ENV == "production":
+                print(
+                    "[config] WARNING: JWT_SECRET_KEY is empty in production. It is also the "
+                    "key that encrypts saved provider API keys, so a container rebuild can make "
+                    "them unreadable. Set JWT_SECRET_KEY in .env to a fixed random value.",
+                    file=sys.stderr,
+                )
 
         if not self.DATABASE_URL:
             self.DATABASE_URL = (

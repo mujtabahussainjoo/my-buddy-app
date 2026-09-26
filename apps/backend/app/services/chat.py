@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.base import ChatMessage
 from app.ai.prompts import system_prompt
+from app.core.exceptions import AppError
 from app.core.logging import logger
 from app.db.models import Conversation
 from app.db.repositories.conversation import ConversationRepository, MessageRepository
@@ -224,7 +225,16 @@ async def stream_message(
             query=body.content,
         ),
     )
-    provider, provider_name = await build_resolved(session, preferred=body.provider, model=body.model)
+    try:
+        provider, provider_name = await build_resolved(
+            session, preferred=body.provider, model=body.model
+        )
+    except AppError as exc:
+        # The response has already started, so a raised error would only produce a
+        # broken stream. Send a readable message the UI can show instead.
+        yield f"data: {json.dumps({'event': 'error', 'detail': exc.message})}\n\n"
+        await session.commit()
+        return
     try:
         llm_response = await provider.chat(prepared)
     except Exception as exc:
