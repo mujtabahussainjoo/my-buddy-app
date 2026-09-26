@@ -77,7 +77,7 @@ def test_bulk_upload_returns_items_and_failures(
     async def fake_save_uploads(session: Any, *, owner_id: uuid.UUID, uploads: Any) -> BulkUploadResult:
         return BulkUploadResult(
             documents=[IngestionResult(document=_document("a.txt"), chunk_count=3)],  # type: ignore[arg-type]
-            failures=[("bad.exe", "Unsupported file type")],
+            failures=[("huge.bin", "File exceeds the 50 MB upload limit")],
         )
 
     monkeypatch.setattr(documents_service, "save_uploads", fake_save_uploads)
@@ -88,7 +88,7 @@ def test_bulk_upload_returns_items_and_failures(
                 "/api/v1/documents/bulk",
                 files=[
                     ("files", ("a.txt", b"hello world")),
-                    ("files", ("bad.exe", b"MZ")),
+                    ("files", ("huge.bin", b"\x00" * 8)),
                 ],
             )
 
@@ -100,7 +100,9 @@ def test_bulk_upload_returns_items_and_failures(
     assert [item["filename"] for item in payload["items"]] == ["a.txt"]
     assert payload["items"][0]["chunk_count"] == 3
     assert payload["items"][0]["is_owner"] is True
-    assert payload["failed"] == [{"filename": "bad.exe", "error": "Unsupported file type"}]
+    assert payload["failed"] == [
+        {"filename": "huge.bin", "error": "File exceeds the 50 MB upload limit"}
+    ]
 
 
 def test_single_upload_accepted_for_regular_user(

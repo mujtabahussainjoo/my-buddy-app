@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useAuth } from '../lib/store';
 import {
-  ACCEPT_ATTRIBUTE,
   MAX_UPLOAD_MB,
   api,
   type DocumentSummary,
@@ -118,7 +117,6 @@ export default function DocumentsView() {
               type="file"
               name="files"
               multiple
-              accept={ACCEPT_ATTRIBUTE}
               className="block max-w-xs text-sm"
               required
             />
@@ -127,8 +125,9 @@ export default function DocumentsView() {
             </button>
           </div>
           <p className="mab-hint mt-2">
-            PDF, Word, TXT, Markdown, CSV, JSON, PNG/JPEG. Select several files at once, up to 50 MB
-            each.
+            Any file type — source code, docs, notes, images. Text-like files (and UTF-8 text of
+            any extension) are chunked and searchable; binaries are stored without text. Select
+            several files at once, up to 50 MB each.
           </p>
           {error && (
             <p className="mab-error mt-2" role="alert">

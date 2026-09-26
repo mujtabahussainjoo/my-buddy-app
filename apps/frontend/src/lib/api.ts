@@ -197,21 +197,5 @@ export const api = {
     uploadFiles('/documents/bulk', files, token, 'files'),
 };
 
-export const ACCEPTED_FILE_EXTENSIONS = [
-  '.pdf',
-  '.doc',
-  '.docx',
-  '.txt',
-  '.md',
-  '.csv',
-  '.json',
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.gif',
-  '.webp',
-] as const;
-
-export const ACCEPT_ATTRIBUTE = ACCEPTED_FILE_EXTENSIONS.join(',');
 export const MAX_UPLOAD_FILES = 20;
 export const MAX_UPLOAD_MB = 50;

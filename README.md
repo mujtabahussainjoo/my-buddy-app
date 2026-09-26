@@ -133,9 +133,15 @@ docker run -p 8080:80 myaibuddy-frontend
 | POST | `/documents/bulk` | Upload many files at once (field `files`, repeatable). Returns `{items, failed[]}` per file |
 | DELETE | `/documents/{id}` | Delete a document — its uploader, or any admin |
 
-Any signed-in user can upload. Chat sends the ids of every ready document as
-`document_ids`; retrieval gives each attached file its best chunk (labelled by
-filename) so one long file cannot crowd out the rest.
+Any signed-in user can upload, and any file type is accepted. Text-like files
+(source code, notebooks, markup, config, logs, plus any unknown extension whose
+bytes decode as UTF-8) are chunked and indexed; binaries such as images, archives
+and executables are stored with `chunk_count: 0`. Content type comes from the file
+extension first, then the browser's report, then a UTF-8 sniff.
+
+Chat sends the ids of every ready document as `document_ids`; retrieval gives each
+attached file its best chunk (labelled by filename) so one long file cannot crowd
+out the rest.
 
 ### Admin (`/admin`)
 | Method | Path | Description |

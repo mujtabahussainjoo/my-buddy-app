@@ -40,15 +40,15 @@ def _upload(name: str) -> UploadFile:
 
 @pytest.fixture
 def ingested(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Replace the per-file ingestion with a stub that rejects ``.exe`` files."""
+    """Replace the per-file ingestion with a stub that rejects oversized files."""
     accepted: list[str] = []
 
     async def fake_save_upload(
         session: object, *, owner_id: uuid.UUID, upload: UploadFile, content_type: str | None = None
     ) -> IngestionResult:
         name = upload.filename or "upload"
-        if name.endswith(".exe"):
-            raise ValidationError("Unsupported file type")
+        if name.endswith(".bin"):
+            raise ValidationError("File exceeds the 50 MB upload limit")
         accepted.append(name)
         return IngestionResult(
             document=SimpleNamespace(id=uuid.uuid4(), filename=name),  # type: ignore[arg-type]
@@ -64,14 +64,14 @@ def test_bulk_upload_keeps_good_files_when_one_fails(ingested: list[str]) -> Non
         return await documents_service.save_uploads(
             _FakeSession(),  # type: ignore[arg-type]
             owner_id=uuid.uuid4(),
-            uploads=[_upload("a.txt"), _upload("bad.exe"), _upload("b.md")],
+            uploads=[_upload("a.txt"), _upload("huge.bin"), _upload("b.md")],
         )
 
     result = asyncio.run(run())
 
     assert ingested == ["a.txt", "b.md"]
     assert [entry.document.filename for entry in result.documents] == ["a.txt", "b.md"]
-    assert result.failures == [("bad.exe", "Unsupported file type")]
+    assert result.failures == [("huge.bin", "File exceeds the 50 MB upload limit")]
 
 
 def test_bulk_upload_caps_file_count(

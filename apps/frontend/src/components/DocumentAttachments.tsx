@@ -1,7 +1,5 @@
 import { useRef, useState, type DragEvent, type RefObject } from 'react';
 import {
-  ACCEPT_ATTRIBUTE,
-  ACCEPTED_FILE_EXTENSIONS,
   MAX_UPLOAD_FILES,
   MAX_UPLOAD_MB,
   api,
@@ -35,11 +33,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function hasAcceptedExtension(filename: string): boolean {
-  const lower = filename.toLowerCase();
-  return ACCEPTED_FILE_EXTENSIONS.some((ext) => lower.endsWith(ext));
-}
-
 export default function DocumentAttachments({
   docs,
   onUploaded,
@@ -56,12 +49,12 @@ export default function DocumentAttachments({
   const addFiles = (incoming: File[], reservedSlots = 0) => {
     if (!token) return;
     setMessage(null);
+    // Any file type is welcome; only the size and the per-request count are capped.
     const accepted: File[] = [];
     const rejected: string[] = [];
 
     for (const file of incoming) {
-      if (!hasAcceptedExtension(file.name)) rejected.push(`${file.name}: unsupported type`);
-      else if (file.size > MAX_UPLOAD_MB * 1024 * 1024) rejected.push(`${file.name}: over ${MAX_UPLOAD_MB} MB`);
+      if (file.size > MAX_UPLOAD_MB * 1024 * 1024) rejected.push(`${file.name}: over ${MAX_UPLOAD_MB} MB`);
       else accepted.push(file);
     }
 
@@ -164,7 +157,6 @@ export default function DocumentAttachments({
         type="file"
         multiple
         className="hidden"
-        accept={ACCEPT_ATTRIBUTE}
         onChange={(event) => {
           addFiles(Array.from(event.target.files ?? []));
           event.target.value = '';
@@ -194,8 +186,8 @@ export default function DocumentAttachments({
 
       {docs.length === 0 && queue.length === 0 ? (
         <p className="mab-subtle px-1 pb-1 text-xs">
-          Drop files here or use “Add documents” — the assistant reads every attached file when it
-          answers.
+          Drop any files here or use “Add documents” — code, docs, notes, images — and the
+          assistant reads every attached file when it answers.
         </p>
       ) : (
         <div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto px-1 pb-1">
@@ -206,8 +198,9 @@ export default function DocumentAttachments({
               className="inline-flex items-center gap-1 rounded-md border border-mab-border bg-[var(--mab-primary-soft)] px-2 py-1 text-xs"
             >
               <span className="max-w-[140px] truncate">{doc.filename}</span>
-              <span className="text-mab-muted">{doc.chunk_count ?? 0}</span>
-              {doc.status === 'ready' && <span className="text-mab-muted">✓</span>}
+              <span className="text-mab-muted" title={doc.chunk_count ? 'text chunks' : 'no text extracted'}>
+                {doc.chunk_count ? `${doc.chunk_count}▦` : 'no text'}
+              </span>
               {doc.status !== 'ready' && <span className="text-[var(--mab-danger)]">⚠</span>}
               <button
                 type="button"
