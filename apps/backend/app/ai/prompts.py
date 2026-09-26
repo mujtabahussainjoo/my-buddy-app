@@ -41,13 +41,21 @@ _KIND_FRAGMENTS = {
 }
 
 
+_DOC_CONTEXT_RULES = (
+    "Documents are attached to this message. Prefer the excerpts in the document "
+    "context for anything they cover, name the file each fact came from, and say so "
+    "plainly when none of them answer the question."
+)
+
+
 def system_prompt(agent_kind: str, *, document_context: str = "") -> str:
     fragment = _KIND_FRAGMENTS.get(agent_kind, _KIND_FRAGMENTS["chat"])
     prompt = _BASE.format(app=APP_NAME, tooling=AUTHORIZED_TOOLING, date=datetime.now(UTC).date().isoformat())
     prompt = f"{prompt}\n\nRole: {fragment}"
     if document_context:
         prompt = (
-            f"{prompt}\n\n## Document context (answer from here first)\n{document_context}\n"
+            f"{prompt}\n\n{_DOC_CONTEXT_RULES}\n\n"
+            f"## Document context (answer from here first)\n{document_context}\n"
             "## End of document context"
         )
     return prompt

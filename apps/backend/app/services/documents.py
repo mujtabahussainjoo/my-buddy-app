@@ -6,9 +6,11 @@ uploads live in a dedicated folder inside the app project.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import NotFoundError, PayloadTooLargeError, ValidationError
+from app.core.exceptions import AppError, NotFoundError, PayloadTooLargeError, ValidationError
 from app.core.logging import logger
 from app.db.models import Document, DocumentChunk
 
@@ -54,6 +56,14 @@ _EXTENSION_TO_TYPE = {ext: ctype for ctype, ext in ALLOWED_CONTENT_TYPES.items()
 class IngestionResult:
     document: Document
     chunk_count: int
+
+
+@dataclass
+class BulkUploadResult:
+    """Outcome of a multi-file upload: successes plus per-file failures."""
+
+    documents: list[IngestionResult]
+    failures: list[tuple[str, str]]
 
 
 def _resolve_upload_root() -> Path:
@@ -142,40 +152,81 @@ async def save_upload(
     storage_path = owner_dir / f"{file_id}{ext}"
     storage_path.write_bytes(raw)
 
-    checksum = hashlib.sha256(raw).hexdigest()
-    document = Document(
-        owner_id=owner_id,
-        filename=upload.filename or f"upload{ext}",
-        content_type=ctype,
-        size_bytes=len(raw),
-        status="processing",
-        storage_path=str(storage_path),
-        checksum=checksum,
-    )
-    session.add(document)
-    await session.flush()
+    try:
+        checksum = hashlib.sha256(raw).hexdigest()
+        document = Document(
+            owner_id=owner_id,
+            filename=upload.filename or f"upload{ext}",
+            content_type=ctype,
+            size_bytes=len(raw),
+            status="processing",
+            storage_path=str(storage_path),
+            checksum=checksum,
+        )
+        session.add(document)
+        await session.flush()
 
-    chunk_count = 0
-    if ctype in TEXT_EXTRACTABLE:
-        text = _extract_text(ctype, storage_path)
-        chunks = _chunk_text(text)
-        for index, chunk in enumerate(chunks):
-            session.add(
-                DocumentChunk(
-                    document_id=document.id,
-                    chunk_index=index,
-                    content=chunk,
-                    token_count=max(1, len(chunk) // 4),
+        chunk_count = 0
+        if ctype in TEXT_EXTRACTABLE:
+            text = _extract_text(ctype, storage_path)
+            chunks = _chunk_text(text)
+            for index, chunk in enumerate(chunks):
+                session.add(
+                    DocumentChunk(
+                        document_id=document.id,
+                        chunk_index=index,
+                        content=chunk,
+                        token_count=max(1, len(chunk) // 4),
+                    )
                 )
-            )
-            chunk_count += 1
-        document.status = "ready"
-    else:
-        # Images and binaries: stored/indexed by filename + metadata only.
-        document.status = "ready"
+                chunk_count += 1
+            document.status = "ready"
+        else:
+            # Images and binaries: stored/indexed by filename + metadata only.
+            document.status = "ready"
 
-    await session.flush()
+        await session.flush()
+    except Exception:
+        await asyncio.to_thread(storage_path.unlink, missing_ok=True)
+        raise
     return IngestionResult(document=document, chunk_count=chunk_count)
+
+
+async def save_uploads(
+    session: AsyncSession,
+    *,
+    owner_id: uuid.UUID,
+    uploads: Sequence[UploadFile],
+) -> BulkUploadResult:
+    """Ingest several files in one request.
+
+    Each file is ingested inside its own savepoint so one bad file (wrong type,
+    too large, unreadable) never discards the files already stored next to it.
+    """
+    limit = settings.MAX_UPLOAD_FILES
+    accepted = list(uploads)
+    documents: list[IngestionResult] = []
+    failures: list[tuple[str, str]] = []
+
+    for upload in accepted[:limit]:
+        name = upload.filename or "upload"
+        try:
+            async with session.begin_nested():
+                documents.append(await save_upload(session, owner_id=owner_id, upload=upload))
+        except AppError as exc:
+            failures.append((name, exc.message))
+        except Exception as exc:  # noqa: BLE001 - one bad file must not fail the batch
+            logger.warning(
+                "document_upload_failed",
+                extra={"extra_fields": {"filename": name, "error": str(exc)}},
+            )
+            failures.append((name, f"Upload failed: {exc}"))
+
+    for upload in accepted[limit:]:
+        failures.append(
+            (upload.filename or "upload", f"At most {limit} files can be uploaded at once")
+        )
+    return BulkUploadResult(documents=documents, failures=failures)
 
 
 async def reingest_document(session: AsyncSession, document: Document) -> IngestionResult:
@@ -208,13 +259,24 @@ async def reingest_document(session: AsyncSession, document: Document) -> Ingest
     return IngestionResult(document=document, chunk_count=chunk_count)
 
 
-async def delete_document(session: AsyncSession, *, document_id: uuid.UUID) -> None:
-    """Soft-delete a document row and remove its file from disk. Admin-scoped."""
+async def delete_document(
+    session: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    owner_id: uuid.UUID | None = None,
+) -> None:
+    """Soft-delete a document row and remove its file from disk.
+
+    ``owner_id`` restricts the deletion to the uploader; pass ``None`` (admins)
+    to allow deleting any document.
+    """
     from app.db.repositories.document import DocumentChunkRepository, DocumentRepository
 
     repo = DocumentRepository(session)
     document = await repo.get(document_id)
     if document is None or document.deleted_at is not None:
+        raise NotFoundError("Document not found")
+    if owner_id is not None and document.owner_id != owner_id:
         raise NotFoundError("Document not found")
     await repo.soft_delete(document)
     await DocumentChunkRepository(session).delete_for_document(document.id)

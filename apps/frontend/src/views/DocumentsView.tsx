@@ -1,18 +1,19 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useAuth } from '../lib/store';
-import { api, type Paginated } from '../lib/api';
+import {
+  ACCEPT_ATTRIBUTE,
+  MAX_UPLOAD_MB,
+  api,
+  type DocumentSummary,
+  type Paginated,
+  type UploadFailure,
+} from '../lib/api';
 
-interface DocumentSummary {
-  id: string;
-  title: string;
-  filename: string;
-  content_type: string | null;
-  status: string;
-  chunk_count: number;
-  created_at: string;
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-
-const ACCEPTED = '.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.json';
 
 export default function DocumentsView() {
   const { user, token } = useAuth();
@@ -21,12 +22,14 @@ export default function DocumentsView() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [failures, setFailures] = useState<UploadFailure[]>([]);
   const [available, setAvailable] = useState<boolean | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!token) return;
     api
-      .get<Paginated<DocumentSummary>>('/documents?page=1&page_size=50', token)
+      .get<Paginated<DocumentSummary>>('/documents?page=1&page_size=100', token)
       .then((page) => {
         setAvailable(true);
         setDocs(page.items);
@@ -37,29 +40,21 @@ export default function DocumentsView() {
 
   const upload = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const input = event.currentTarget.elements.namedItem('file') as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file || !token) return;
-    if (file.size > 50 * 1024 * 1024) {
-      setError('File exceeds the 50 MB upload limit');
+    const input = event.currentTarget.elements.namedItem('files') as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    if (!token || !files.length) return;
+    const tooBig = files.filter((file) => file.size > MAX_UPLOAD_MB * 1024 * 1024);
+    if (tooBig.length) {
+      setError(`${tooBig.map((f) => f.name).join(', ')} exceed the ${MAX_UPLOAD_MB} MB limit`);
       return;
     }
     setUploading(true);
     setError(null);
-    const form = new FormData();
-    form.append('file', file);
+    setFailures([]);
     try {
-      const res = await fetch('/api/v1/documents', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: form,
-      });
-      const payload = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(payload?.error?.message ?? `Upload failed (${res.status})`);
-      }
-      const created = payload.data as DocumentSummary;
-      setDocs((prev) => [created, ...prev]);
+      const result = await api.uploadDocuments(files, token);
+      setDocs((prev) => [...result.items, ...prev]);
+      setFailures(result.failed);
       input.value = '';
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed');
@@ -70,7 +65,7 @@ export default function DocumentsView() {
 
   const deleteDoc = async (doc: DocumentSummary) => {
     if (!token) return;
-    if (!window.confirm(`Delete "${doc.title}"? This removes it from the shared knowledge base.`)) {
+    if (!window.confirm(`Delete "${doc.filename}"? This removes it from the shared knowledge base.`)) {
       return;
     }
     setUploading(true);
@@ -116,39 +111,40 @@ export default function DocumentsView() {
       </div>
 
       <div className="mb-8 max-w-3xl">
-        {isAdmin ? (
-          <form onSubmit={upload} className="mab-panel rounded-xl border border-mab-border p-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <input
-                type="file"
-                name="file"
-                accept={ACCEPTED}
-                className="block max-w-xs text-sm"
-                required
-              />
-              <button
-                type="submit"
-                className="mab-btn mab-btn-primary mab-btn-md"
-                disabled={uploading}
-              >
-                {uploading ? 'Uploading…' : 'Upload'}
-              </button>
-            </div>
-            <p className="mab-hint mt-2">
-              PDF (incl. scanned), Word, PowerPoint, Excel, TXT, Markdown, CSV, JSON. Max 50 MB.
-            </p>
-            {error && (
-              <p className="mab-error mt-2" role="alert">
-                {error}
-              </p>
-            )}
-          </form>
-        ) : (
-          <p className="mab-hint">
-            You're viewing documents as <strong>{user?.email}</strong>. Only admins can upload or
-            delete documents — you can browse the shared knowledge base and chat over it.
+        <form onSubmit={upload} className="mab-panel rounded-xl border border-mab-border p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              name="files"
+              multiple
+              accept={ACCEPT_ATTRIBUTE}
+              className="block max-w-xs text-sm"
+              required
+            />
+            <button type="submit" className="mab-btn mab-btn-primary mab-btn-md" disabled={uploading}>
+              {uploading ? 'Uploading…' : 'Upload'}
+            </button>
+          </div>
+          <p className="mab-hint mt-2">
+            PDF, Word, TXT, Markdown, CSV, JSON, PNG/JPEG. Select several files at once, up to 50 MB
+            each.
           </p>
-        )}
+          {error && (
+            <p className="mab-error mt-2" role="alert">
+              {error}
+            </p>
+          )}
+          {failures.length > 0 && (
+            <ul className="mab-error mt-2 text-xs">
+              {failures.map((failure) => (
+                <li key={failure.filename}>
+                  {failure.filename}: {failure.error}
+                </li>
+              ))}
+            </ul>
+          )}
+        </form>
       </div>
 
       <div className="max-w-3xl space-y-2">
@@ -160,20 +156,20 @@ export default function DocumentsView() {
               <div className="flex items-center gap-3">
                 <span className="text-xl">📄</span>
                 <div>
-                  <div className="text-sm font-medium">{doc.title}</div>
+                  <div className="text-sm font-medium">{doc.filename}</div>
                   <div className="text-xs text-mab-muted">
-                    {doc.filename} · {doc.status} · {doc.chunk_count} chunks
+                    {doc.content_type} · {formatBytes(doc.size_bytes)} · {doc.chunk_count} chunks
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <span className="mab-badge mab-badge-neutral">{doc.status}</span>
-                {isAdmin && (
+                {(isAdmin || doc.is_owner) && (
                   <button
                     type="button"
                     className="mab-btn mab-btn-danger mab-btn-sm"
                     disabled={uploading}
-                    onClick={() => deleteDoc(doc)}
+                    onClick={() => void deleteDoc(doc)}
                   >
                     Delete
                   </button>
@@ -183,7 +179,8 @@ export default function DocumentsView() {
           ))
         )}
         <p className="mab-subtle pt-4 text-xs">
-          Signed in as {user?.email}. Only admins can delete documents.
+          Signed in as {user?.email}. You can delete the documents you uploaded
+          {isAdmin ? '; as an admin, any document.' : '.'}
         </p>
       </div>
     </div>

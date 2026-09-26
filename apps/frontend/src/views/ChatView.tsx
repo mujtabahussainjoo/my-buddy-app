@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useAuth } from '../lib/store';
 import { api, API_BASE, type ConversationSummary, type DocumentSummary, type MessageOut } from '../lib/api';
+import DocumentAttachments from '../components/DocumentAttachments';
 
 const AGENT_KINDS: { value: string; label: string }[] = [
   { value: 'chat', label: 'General chat' },
@@ -119,7 +120,6 @@ export default function ChatView() {
   const [showKinds, setShowKinds] = useState(false);
   const [creating, setCreating] = useState(false);
   const [attachedDocs, setAttachedDocs] = useState<DocumentSummary[]>([]);
-  const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -147,7 +147,7 @@ export default function ChatView() {
     if (!token) return;
     try {
       const page = await api.get<{ items: DocumentSummary[]; total: number }>(
-        '/documents?page=1&page_size=100',
+        '/documents?page=1&page_size=200',
         token,
       );
       setAttachedDocs(page.items);
@@ -164,7 +164,6 @@ export default function ChatView() {
       setStreaming(false);
       setActiveId(id);
       setLoadingMsgs(true);
-      setAttachedDocs([]);
       setError(null);
       try {
         const detail = await api.get<{ messages: MessageOut[] }>(`/conversations/${id}`, token);
@@ -175,10 +174,9 @@ export default function ChatView() {
       } finally {
         setLoadingMsgs(false);
       }
-      const conv = conversations.find((c) => c.id === id);
-      if (conv?.agent_kind === 'rag') void loadDocuments();
+      void loadDocuments();
     },
-    [token, conversations, loadDocuments],
+    [token, loadDocuments],
   );
 
   const createConversation = useCallback(
@@ -191,7 +189,6 @@ export default function ChatView() {
           agent_kind: chosenKind,
         }, token);
         setConversations((prev) => [created, ...prev]);
-        setAttachedDocs([]);
         void openConversation(created.id);
         setShowKinds(false);
       } catch (err) {
@@ -217,42 +214,24 @@ export default function ChatView() {
     [token, activeId],
   );
 
-  const handleUpload = useCallback(
-    async (file: File) => {
-      if (!token) return;
-      setUploading(true);
-      try {
-        const formData = new FormData();
-        formData.append('file', file);
-        const res = await fetch(`${API_BASE}/documents`, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData,
-        });
-        if (!res.ok) {
-          const errBody = await res.json().catch(() => null);
-          throw new Error(errBody?.error?.message ?? `Upload failed (${res.status})`);
-        }
-        const doc = (await res.json())?.data as DocumentSummary;
-        if (doc) setAttachedDocs((prev) => [doc, ...prev]);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Upload failed');
-      } finally {
-        setUploading(false);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-      }
-    },
-    [token],
-  );
+  const handleUploaded = useCallback((uploaded: DocumentSummary[]) => {
+    setAttachedDocs((prev) => {
+      const known = new Set(prev.map((doc) => doc.id));
+      return [...uploaded.filter((doc) => !known.has(doc.id)), ...prev];
+    });
+  }, []);
 
   const handleDeleteDoc = useCallback(
-    async (docId: string) => {
+    async (doc: DocumentSummary) => {
       if (!token) return;
+      if (!window.confirm(`Delete "${doc.filename}"? It is removed from the shared knowledge base.`)) {
+        return;
+      }
       try {
-        await api.del(`/documents/${docId}`, token);
-        setAttachedDocs((prev) => prev.filter((d) => d.id !== docId));
-      } catch {
-        setError('Failed to delete document');
+        await api.del(`/documents/${doc.id}`, token);
+        setAttachedDocs((prev) => prev.filter((d) => d.id !== doc.id));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to delete document');
       }
     },
     [token],
@@ -262,8 +241,7 @@ export default function ChatView() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, streaming]);
 
-  const activeConv = conversations.find((c) => c.id === activeId);
-  const isRagMode = activeConv?.agent_kind === 'rag';
+  const readyDocIds = attachedDocs.filter((doc) => doc.status === 'ready').map((doc) => doc.id);
 
   const appendDelta = useCallback((content: string) => {
     setMessages((prev) => {
@@ -346,7 +324,7 @@ const send = useCallback(
             }
           },
           controller.signal,
-          attachedDocs.length ? attachedDocs.map((d) => d.id) : undefined,
+          readyDocIds.length ? readyDocIds : undefined,
         );
       } catch (err) {
         aborted = err instanceof DOMException && err.name === 'AbortError';
@@ -371,7 +349,7 @@ const send = useCallback(
         void refreshList();
       }
     },
-    [draft, token, activeId, streaming, attachedDocs, appendDelta, refreshList],
+    [draft, token, activeId, streaming, readyDocIds, appendDelta, refreshList],
   );
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -383,16 +361,6 @@ const send = useCallback(
 
   return (
     <div className="flex h-full">
-      <input
-        ref={fileInputRef}
-        type="file"
-        className="hidden"
-        accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.gif,.webp"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) void handleUpload(f);
-        }}
-      />
       <div className="flex w-72 shrink-0 flex-col border-r border-mab-border">
         <div className="p-3">
           <button
@@ -537,52 +505,22 @@ const send = useCallback(
             </div>
 
             <div className="border-t border-mab-border p-4">
-              {isRagMode && (
-                <div className="mb-2 rounded-xl border border-mab-border bg-mab-panel p-2">
-                  <div className="mb-1 flex items-center justify-between px-1">
-                    <span className="mab-subtle text-xs font-medium">Attached documents</span>
-                    <button
-                      type="button"
-                      className="mab-btn mab-btn-ghost mab-btn-sm text-xs"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading}
-                    >
-                      {uploading ? 'Uploading…' : '+ Upload'}
-                    </button>
-                  </div>
-                  {attachedDocs.length === 0 ? (
-                    <p className="mab-subtle px-1 pb-1 text-xs">
-                      No documents yet. Upload a file to ground answers in your content.
-                    </p>
-                  ) : (
-                    <div className="flex flex-wrap gap-1.5">
-                      {attachedDocs.map((doc) => (
-                        <span
-                          key={doc.id}
-                          className="inline-flex items-center gap-1 rounded-md border border-mab-border bg-[var(--mab-primary-soft)] px-2 py-1 text-xs"
-                        >
-                          <span className="max-w-[120px] truncate">{doc.filename}</span>
-                          {doc.status === 'ready' && (
-                            <span className="text-mab-muted">✓</span>
-                          )}
-                          {doc.status === 'failed' && (
-                            <span className="text-[var(--mab-danger)]">⚠</span>
-                          )}
-                          <button
-                            type="button"
-                            className="ml-1 text-mab-muted hover:text-[var(--mab-danger)]"
-                            onClick={() => void handleDeleteDoc(doc.id)}
-                            title={`Delete ${doc.filename}`}
-                          >
-                            ✕
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              <DocumentAttachments
+                docs={attachedDocs}
+                onUploaded={handleUploaded}
+                onDelete={(doc) => void handleDeleteDoc(doc)}
+                inputRef={fileInputRef}
+              />
               <div className="mab-panel flex items-end gap-2 rounded-xl border border-mab-border p-2">
+                <button
+                  type="button"
+                  className="mab-btn mab-btn-ghost mab-btn-sm shrink-0 px-2"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Attach documents"
+                  aria-label="Attach documents"
+                >
+                  📎
+                </button>
                 <textarea
                   className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none"
                   placeholder="Ask anything…  (Enter to send, Shift+Enter for a new line)"

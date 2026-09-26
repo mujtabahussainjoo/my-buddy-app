@@ -17,6 +17,7 @@ class DocumentSummaryOut(BaseModel):
     chunk_count: int = 0
     error_message: str | None = None
     created_at: datetime
+    is_owner: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -34,5 +35,16 @@ class RAGRetrievalItem(BaseModel):
     chunk_index: int
     content: str
     score: float = Field(default=0.0)
+    filename: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class BulkUploadFailure(BaseModel):
+    filename: str
+    error: str
+
+
+class BulkUploadResultOut(BaseModel):
+    items: list[DocumentSummaryOut] = Field(default_factory=list)
+    failed: list[BulkUploadFailure] = Field(default_factory=list)

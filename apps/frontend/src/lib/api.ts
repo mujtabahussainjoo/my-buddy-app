@@ -32,6 +32,17 @@ export interface DocumentSummary {
   chunk_count: number;
   error_message: string | null;
   created_at: string;
+  is_owner?: boolean;
+}
+
+export interface UploadFailure {
+  filename: string;
+  error: string;
+}
+
+export interface BulkUploadResult {
+  items: DocumentSummary[];
+  failed: UploadFailure[];
 }
 
 export interface MessageOut {
@@ -146,6 +157,33 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (payload as { data: T }).data as T;
 }
 
+async function uploadFiles(
+  path: string,
+  files: File[],
+  token: string,
+  field: string,
+): Promise<BulkUploadResult> {
+  const form = new FormData();
+  files.forEach((file) => form.append(field, file));
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  let payload: { data?: BulkUploadResult; error?: { message?: string } } | null = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    throw new ApiError(payload?.error?.message ?? `Upload failed (${response.status})`, {
+      status: response.status,
+    });
+  }
+  return payload?.data ?? { items: [], failed: [] };
+}
+
 export const api = {
   get: <T>(path: string, token?: string | null) => request<T>(path, { method: 'GET', token }),
   post: <T>(path: string, body: unknown, token?: string | null) =>
@@ -155,4 +193,25 @@ export const api = {
   patch: <T>(path: string, body: unknown, token?: string | null) =>
     request<T>(path, { method: 'PATCH', body, token }),
   del: <T>(path: string, token?: string | null) => request<T>(path, { method: 'DELETE', token }),
+  uploadDocuments: (files: File[], token: string) =>
+    uploadFiles('/documents/bulk', files, token, 'files'),
 };
+
+export const ACCEPTED_FILE_EXTENSIONS = [
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.txt',
+  '.md',
+  '.csv',
+  '.json',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+] as const;
+
+export const ACCEPT_ATTRIBUTE = ACCEPTED_FILE_EXTENSIONS.join(',');
+export const MAX_UPLOAD_FILES = 20;
+export const MAX_UPLOAD_MB = 50;

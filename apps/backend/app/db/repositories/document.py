@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, select
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.exceptions import NotFoundError
 from app.db.models import Document, DocumentChunk
@@ -55,6 +56,25 @@ class DocumentRepository(BaseRepository[Document]):
             page_size=page_size,
         )
         return items, total
+
+    async def list_by_ids(
+        self,
+        document_ids: list[uuid.UUID],
+        *,
+        only_ready: bool = False,
+    ) -> list[Document]:
+        """Fetch specific non-deleted documents, e.g. the ids attached to a chat message."""
+        if not document_ids:
+            return []
+        filters: list[ColumnElement[bool]] = [
+            Document.id.in_(document_ids),
+            Document.deleted_at.is_(None),
+        ]
+        if only_ready:
+            filters.append(Document.status == "ready")
+        stmt = select(Document).where(*filters)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
 
     async def soft_delete(self, document: Document) -> None:
         document.deleted_at = datetime.now(UTC)

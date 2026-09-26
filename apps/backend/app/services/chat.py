@@ -105,7 +105,12 @@ async def _build_document_context(
     document_ids: list[uuid.UUID],
     query: str,
 ) -> str:
-    """Retrieve relevant chunks and format them for injection into the system prompt."""
+    """Retrieve relevant chunks across the attached documents and format the block.
+
+    Every document attached to the message gets its best-matching chunk in the
+    block (see ``app.ai.rag.retrieval.diversify_ranked``) and each excerpt is
+    labelled with its filename so the model can cite the file it used.
+    """
     if not document_ids:
         return ""
     try:
@@ -113,14 +118,21 @@ async def _build_document_context(
         from app.db.repositories.document import DocumentRepository  # noqa: PLC0415
     except ImportError:
         return ""
-    doc_repo = DocumentRepository(session)
-    doc_list, _ = await doc_repo.list_all(page=1, page_size=500)
-    available_ids = {d.id for d in doc_list}
-    valid_ids = [did for did in document_ids if did in available_ids]
-    if not valid_ids:
+    docs = await DocumentRepository(session).list_by_ids(document_ids, only_ready=True)
+    if not docs:
         return ""
-    items = await retrieve_context(session, document_ids=valid_ids, query=query)
-    return format_context(items)
+    filenames = {doc.id: doc.filename for doc in docs}
+    items = await retrieve_context(
+        session,
+        document_ids=list(filenames),
+        query=query,
+        filenames=filenames,
+    )
+    body = format_context(items)
+    if not body:
+        return ""
+    listing = ", ".join(sorted(filenames.values()))
+    return f"Files attached: {listing}\n\n{body}"
 
 
 async def send_message(
