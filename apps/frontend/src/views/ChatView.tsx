@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useAuth } from '../lib/store';
 import { api, API_BASE, type ConversationSummary, type DocumentSummary, type MessageOut } from '../lib/api';
 import DocumentAttachments from '../components/DocumentAttachments';
+import MessageActions from '../components/MessageActions';
 
 const AGENT_KINDS: { value: string; label: string }[] = [
   { value: 'chat', label: 'General chat' },
@@ -206,6 +207,12 @@ export default function ChatView() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Settled, non-empty turns — the transcript offered by the Export menu.
+  const exportableMessages = useMemo(
+    () => messages.filter((msg) => !isStreamMessage(msg) && msg.content.trim()),
+    [messages],
+  );
 
   const refreshList = useCallback(async () => {
     if (!token) return;
@@ -541,8 +548,11 @@ export default function ChatView() {
                     <div key={msg.id} className="flex justify-end">
                       <div className="max-w-[80%] rounded-2xl bg-[var(--mab-primary)] px-4 py-2 text-white">
                         <div className="whitespace-pre-wrap break-words text-sm">{msg.content}</div>
-                        <div className="mt-1 text-right text-[10px] text-white/60">
-                          {formatTime(msg.created_at)}
+                        <div className="mt-1 flex items-end justify-between gap-2">
+                          <MessageActions message={msg} conversation={exportableMessages} tone="dark" />
+                          <span className="shrink-0 text-[10px] text-white/60">
+                            {formatTime(msg.created_at)}
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -566,6 +576,9 @@ export default function ChatView() {
                           </div>
                         ) : (
                           <div className="whitespace-pre-wrap break-words text-sm">{msg.content}</div>
+                        )}
+                        {!isStreamMessage(msg) && (
+                          <MessageActions message={msg} conversation={exportableMessages} />
                         )}
                       </div>
                     </div>

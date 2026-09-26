@@ -2,4 +2,5 @@ packages:
   - apps/frontend
   - packages/*
 allowBuilds:
+  core-js: false
   esbuild: true
