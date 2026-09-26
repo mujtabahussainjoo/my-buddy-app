@@ -14,7 +14,7 @@ const AGENT_KINDS: { value: string; label: string }[] = [
 ];
 
 type StreamEvent =
-  | { type: 'chat_start'; conversation_id: string; message_id: string }
+  | { type: 'chat_start'; user_message_id: string }
   | { type: 'delta'; content: string }
   | { type: 'chat_end'; message: MessageOut }
   | { type: 'error'; detail: string };
@@ -71,6 +71,89 @@ async function streamChat(
 function formatTime(iso: string | null): string {
   if (!iso) return '';
   return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Marker model used by the in-progress assistant bubble. */
+const STREAM_MODEL = '__stream__';
+/** The thinking dots must stay up briefly, otherwise they flash and vanish. */
+const MIN_LOADING_MS = 1200;
+/** Temporary id for the user's own message until the server confirms it. */
+const PENDING_USER_ID = '__pending_user__';
+
+function userMessage(content: string, id = PENDING_USER_ID): MessageOut {
+  return {
+    id,
+    role: 'user',
+    content,
+    model: null,
+    created_at: new Date().toISOString(),
+  } as MessageOut;
+}
+
+function streamMessage(content: string): MessageOut {
+  return {
+    id: `${STREAM_MODEL}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    role: 'assistant',
+    content,
+    model: STREAM_MODEL,
+    created_at: new Date().toISOString(),
+  } as MessageOut;
+}
+
+/** Give the user's bubble its saved id so it stops looking temporary. */
+function confirmUserMessage(previous: MessageOut[], savedId: string): MessageOut[] {
+  const index = previous.findIndex((m) => m.id === PENDING_USER_ID);
+  if (index < 0) return previous;
+  const next = previous.slice();
+  next[index] = { ...(next[index] as MessageOut), id: savedId };
+  return next;
+}
+
+function isStreamMessage(message: MessageOut | undefined): boolean {
+  return message?.model === STREAM_MODEL;
+}
+
+/** Append text to the streaming bubble, creating it on first use. */
+function appendToStream(previous: MessageOut[], text: string): MessageOut[] {
+  const index = previous.findIndex(isStreamMessage);
+  if (index < 0) return [...previous, streamMessage(text)];
+  const next = previous.slice();
+  next[index] = {
+    ...(next[index] as MessageOut),
+    content: (next[index]?.content ?? '') + text,
+  };
+  return next;
+}
+
+/**
+ * Swap the streaming bubble for the saved message, keeping any text that was
+ * already shown so the answer can never disappear. The bubble is found by marker
+ * instead of by position, so real messages are never removed by accident.
+ */
+function settleStream(previous: MessageOut[], final: MessageOut | null): MessageOut[] {
+  const index = previous.findIndex(isStreamMessage);
+  const streamed = index >= 0 ? (previous[index]?.content ?? '') : '';
+  const settled = final
+    ? { ...final, content: final.content || streamed }
+    : { ...streamMessage(streamed), content: streamed, model: null };
+  if (index < 0) return [...previous, settled];
+  const next = previous.slice();
+  next[index] = settled;
+  return next;
+}
+
+/** Throw away a still-empty placeholder, e.g. when the request failed. */
+function dropEmptyStream(previous: MessageOut[]): MessageOut[] {
+  const index = previous.findIndex(isStreamMessage);
+  if (index >= 0 && (previous[index]?.content ?? '') === '') {
+    return previous.filter((_, i) => i !== index);
+  }
+  return previous;
+}
+
+/** End the stream after a failure: keep any text, but stop the blinking cursor. */
+function closeStream(previous: MessageOut[]): MessageOut[] {
+  return settleStream(dropEmptyStream(previous), null);
 }
 
 function RobotAvatar() {
@@ -243,60 +326,55 @@ export default function ChatView() {
 
   const readyDocIds = attachedDocs.filter((doc) => doc.status === 'ready').map((doc) => doc.id);
 
-  const appendDelta = useCallback((content: string) => {
-    setMessages((prev) => {
-      const idx = prev.length - 1;
-      if (idx >= 0 && prev[idx]?.role === 'assistant' && prev[idx]?.model === '__stream__') {
-        const next = prev.slice();
-        next[idx] = { ...next[idx] as MessageOut, content: (prev[idx]?.content ?? '') + content };
-        return next;
-      }
-      return [...prev, { id: '__stream__', role: 'assistant', content, model: '__stream__', created_at: new Date().toISOString() } as MessageOut];
-    });
-  }, []);
-
-  const STREAM_MIN_VISIBLE_MS = 1200;
-
-const send = useCallback(
+  const send = useCallback(
     async (override?: string) => {
       const content = (override ?? draft).trim();
       if (!token || !activeId || !content || streaming) return;
       if (!override) setDraft('');
-      setMessages((prev) => [
-        ...prev,
-        { id: 'pending', role: 'user', content, model: null, created_at: new Date().toISOString() } as MessageOut,
-      ]);
-      if (!override) appendDelta('');
-      setStreaming(true);
       setError(null);
+
+      // Show the question and the thinking dots straight away, whatever the reply speed is.
+      setMessages((prev) => [...prev, userMessage(content), streamMessage('')]);
+      setStreaming(true);
 
       const startedAt = Date.now();
       let buffered = '';
-      let revealedOnce = false;
+      let revealed = false;
       let aborted = false;
+      let settled = false;
+      let finalMessage: MessageOut | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
-      let pendingFinal: MessageOut | null = null;
 
-      const reveal = (final?: MessageOut) => {
-        if (aborted) return;
-        if (final) pendingFinal = final;
-        const remaining = STREAM_MIN_VISIBLE_MS - (Date.now() - startedAt);
-        if (remaining > 0 && !revealedOnce) {
-          if (!timer) timer = setTimeout(() => reveal(), remaining);
+      const stopTimer = () => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+      };
+
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        stopTimer();
+        setMessages((prev) => settleStream(prev, finalMessage));
+        setStreaming(false);
+        void refreshList();
+      };
+
+      // Hold the dots for a beat so they never flash and vanish, then show the text.
+      const reveal = () => {
+        if (aborted || settled) return;
+        const remaining = MIN_LOADING_MS - (Date.now() - startedAt);
+        if (!revealed && remaining > 0) {
+          if (!timer) timer = setTimeout(reveal, remaining);
           return;
         }
-        if (!revealedOnce) {
-          revealedOnce = true;
+        if (!revealed) {
+          revealed = true;
           if (buffered) {
-            appendDelta(buffered);
+            setMessages((prev) => appendToStream(prev, buffered));
             buffered = '';
           }
         }
-        if (pendingFinal) {
-          setMessages((prev) => [...prev.slice(0, -1), pendingFinal as MessageOut]);
-          setStreaming(false);
-          void refreshList();
-        }
+        if (finalMessage) settle();
       };
 
       const controller = new AbortController();
@@ -308,48 +386,51 @@ const send = useCallback(
           content,
           token,
           (event) => {
+            if (event.type === 'chat_start') {
+              setMessages((prev) => confirmUserMessage(prev, event.user_message_id));
+            }
             if (event.type === 'delta') {
-              if (revealedOnce) appendDelta(event.content);
+              if (revealed) setMessages((prev) => appendToStream(prev, event.content));
               else {
                 buffered += event.content;
                 reveal();
               }
             }
-            if (event.type === 'chat_end') reveal(event.message);
+            if (event.type === 'chat_end') {
+              finalMessage = event.message;
+              reveal();
+            }
             if (event.type === 'error') {
               setError(event.detail);
-              if (timer) clearTimeout(timer);
-              setMessages((prev) => prev.filter((m) => m.model !== '__stream__' && m.id !== 'pending'));
-              abortRef.current?.abort();
+              stopTimer();
+              setMessages((prev) => closeStream(prev));
+              setStreaming(false);
+              controller.abort();
             }
           },
           controller.signal,
           readyDocIds.length ? readyDocIds : undefined,
         );
+        reveal();
       } catch (err) {
         aborted = err instanceof DOMException && err.name === 'AbortError';
-        if (timer) clearTimeout(timer);
+        stopTimer();
         if (aborted) return;
         setError(err instanceof Error ? err.message : 'Stream failed');
-        setMessages((prev) => prev.filter((m) => m.model !== '__stream__' && m.id !== 'pending'));
-      } finally {
-        abortRef.current = null;
-        if (aborted && timer) clearTimeout(timer);
-        setMessages((prev) => {
-          const idx = prev.length - 1;
-          const last = prev[idx];
-          if (last?.model === '__stream__' && (last.content ?? '') === '') {
-            const next = prev.slice(0, -1);
-            if (pendingFinal) return [...next, pendingFinal];
-            return next;
-          }
-          return prev;
-        });
+        setMessages((prev) => closeStream(prev));
         setStreaming(false);
         void refreshList();
+      } finally {
+        abortRef.current = null;
+        stopTimer();
+        if (!settled && !aborted) {
+          // The stream ended without a saved reply: keep the text, stop the blinking cursor.
+          settle();
+        }
+        setStreaming(false);
       }
     },
-    [draft, token, activeId, streaming, readyDocIds, appendDelta, refreshList],
+    [draft, token, activeId, streaming, readyDocIds, refreshList],
   );
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -471,14 +552,14 @@ const send = useCallback(
                         <RobotAvatar />
                       </span>
                       <div className="max-w-[85%] rounded-2xl border border-mab-border bg-mab-panel px-4 py-2">
-                        {msg.model !== '__stream__' && (
+                        {msg.model !== STREAM_MODEL && (
                           <div className="mb-0.5 text-[10px] uppercase tracking-wide text-mab-muted">
                             {msg.model ?? 'assistant'}
                           </div>
                         )}
-                        {msg.model === '__stream__' && !msg.content ? (
-                          <ThinkingLoader text="Loading conversation…" />
-                        ) : msg.model === '__stream__' ? (
+                        {isStreamMessage(msg) && !msg.content ? (
+                          <ThinkingLoader text="Thinking…" />
+                        ) : isStreamMessage(msg) ? (
                           <div className="whitespace-pre-wrap break-words text-sm">
                             {msg.content}
                             <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse align-middle bg-[var(--mab-accent)]" />
@@ -490,16 +571,6 @@ const send = useCallback(
                     </div>
                   ),
                 )
-              )}
-              {streaming && messages.length === 0 && (
-                <div className="flex items-start justify-start gap-2">
-                  <span className="mab-msg-avatar mt-1">
-                    <RobotAvatar />
-                  </span>
-                  <div className="rounded-2xl border border-mab-border bg-mab-panel px-4 py-2">
-                    <ThinkingLoader text="Loading conversation…" />
-                  </div>
-                </div>
               )}
               {error && <p className="mab-error text-sm">{error}</p>}
             </div>
