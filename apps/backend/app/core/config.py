@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: float = 60.0
     TOOL_TIMEOUT_SECONDS: float = 30.0
 
+    # Largest prompt we send to a model, in characters (~4 chars per token).
+    # Larger messages are trimmed to fit rather than rejected.
+    LLM_MAX_INPUT_CHARS: int = 400_000
+
     @model_validator(mode="after")
     def _finalize(self) -> Settings:
         if self.APP_ENV != "test" and not self.JWT_SECRET_KEY:

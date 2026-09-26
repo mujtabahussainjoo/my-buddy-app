@@ -45,7 +45,9 @@ class ConversationDetail(BaseModel):
 
 
 class ChatMessageInput(BaseModel):
-    content: str = Field(min_length=1, max_length=20_000)
+    # No length cap: users paste whole documents. Anything too large for the
+    # model's context window is trimmed when the prompt is built, not rejected here.
+    content: str = Field(min_length=1)
 
 
 class ProviderPreference(BaseModel):
@@ -54,7 +56,7 @@ class ProviderPreference(BaseModel):
 
 
 class ChatRequest(ProviderPreference):
-    content: str = Field(min_length=1, max_length=20_000)
+    content: str = Field(min_length=1)
     stream: bool = False
     include_memory: bool = Field(default=True, description="Whether to use conversation history")
     document_ids: list[uuid.UUID] | None = Field(

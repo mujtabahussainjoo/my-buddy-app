@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import uuid
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.ai.prompts import system_prompt
+from app.db.models import Conversation
 from app.schemas.documents import RAGRetrievalItem
 from app.services.chat import _build_document_context
 
@@ -131,3 +133,93 @@ def test_error_logs_carry_the_reason_not_just_a_name() -> None:
         std_logging.getLogger().handlers = [
             h for h in std_logging.getLogger().handlers if h is not ring_buffer
         ]
+
+
+def test_a_very_long_message_is_accepted() -> None:
+    """Users paste whole documents; the API must not reject them."""
+    from app.schemas.chat import ChatRequest
+
+    huge = "x" * 500_000
+    request = ChatRequest(content=huge)
+
+    assert len(request.content) == 500_000
+
+
+def test_short_text_is_left_alone() -> None:
+    from app.services.chat import _fit_text
+
+    text, trimmed = _fit_text("hello world", 100)
+
+    assert text == "hello world"
+    assert trimmed is False
+
+
+def test_long_text_keeps_both_ends_and_says_what_was_dropped() -> None:
+    from app.services.chat import _fit_text
+
+    text, trimmed = _fit_text("START" + ("y" * 5000) + "QUESTION", 100)
+
+    assert trimmed is True
+    assert text.startswith("START")
+    assert text.endswith("QUESTION")
+    assert "characters omitted" in text
+    assert len(text) < 200
+
+
+def test_history_is_dropped_before_the_current_message_is_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The question you just asked matters more than old turns."""
+    from types import SimpleNamespace
+
+    from app.core.config import settings
+    from app.services import chat as chat_service
+
+    monkeypatch.setattr(settings, "LLM_MAX_INPUT_CHARS", 2_000)
+    old = SimpleNamespace(role="user", content="o" * 1_500)
+    newer = SimpleNamespace(role="assistant", content="a" * 100)
+
+    class HistoryRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def history(self, *_args: object, **_kwargs: object) -> list[object]:
+            return [old, newer]  # oldest first
+
+    monkeypatch.setattr(chat_service, "MessageRepository", HistoryRepo)
+    conversation = SimpleNamespace(id=uuid.uuid4(), agent_kind="chat")
+
+    msgs = asyncio.run(
+        chat_service._build_messages(
+            AsyncMock(), cast(Conversation, conversation), "NEWEST", include_memory=True
+        )
+    )
+
+    roles = [m.role for m in msgs]
+    assert msgs[-1].content == "NEWEST", "the current message must survive intact"
+    assert "a" * 100 in [m.content for m in msgs], "the recent turn is kept"
+    assert "o" * 1_500 not in [m.content for m in msgs], "the oversized old turn is dropped"
+    assert roles[0] == "system"
+
+
+def test_include_memory_false_sends_only_the_new_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from app.services import chat as chat_service
+
+    class HistoryRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def history(self, *_args: object, **_kwargs: object) -> list[object]:
+            raise AssertionError("history must not be read when memory is off")
+
+    monkeypatch.setattr(chat_service, "MessageRepository", HistoryRepo)
+    conversation = SimpleNamespace(id=uuid.uuid4(), agent_kind="chat")
+
+    msgs = asyncio.run(
+        chat_service._build_messages(
+            AsyncMock(), cast(Conversation, conversation), "hello", include_memory=False
+        )
+    )
+
+    assert [m.role for m in msgs] == ["system", "user"]
+    assert msgs[-1].content == "hello"

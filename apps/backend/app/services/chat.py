@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.base import ChatMessage
 from app.ai.prompts import system_prompt
+from app.core.config import settings
 from app.core.exceptions import AppError
 from app.core.logging import logger
 from app.db.models import Conversation
@@ -20,6 +21,22 @@ from app.services.audit import record_audit
 from app.services.providers import build_resolved
 
 _MAX_HISTORY = 30
+
+
+def _fit_text(text: str, limit: int) -> tuple[str, bool]:
+    """Shorten text to ``limit`` characters, keeping the start and the end.
+
+    Users paste whole documents, and a model only reads a fixed amount. Keeping
+    both ends means the opening context and the closing question both survive;
+    only the bulky middle is dropped, with a marker saying how much.
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+    head = limit // 2
+    tail = max(0, limit - head)
+    omitted = len(text) - limit
+    marker = f"\n\n[... {omitted:,} characters omitted to fit the model's context window ...]\n\n"
+    return f"{text[:head]}{marker}{text[len(text) - tail:]}" if tail else f"{text[:head]}{marker}", True
 
 
 async def list_conversations(
@@ -92,11 +109,32 @@ async def _build_messages(
     msgs: list[ChatMessage] = []
     system = system_prompt(conversation.agent_kind, document_context=document_context)
     msgs.append(ChatMessage(role="system", content=system))
+
+    # The model reads a fixed amount, so trim instead of failing the request.
+    budget = max(1_000, settings.LLM_MAX_INPUT_CHARS - len(system))
     if include_memory:
         history = await MessageRepository(session).history(conversation.id, max_messages=_MAX_HISTORY)
-        for message in history:
-            msgs.append(ChatMessage(role=message.role, content=message.content))
-    msgs.append(ChatMessage(role="user", content=user_content))
+        kept: list[ChatMessage] = []
+        for message in reversed(history):
+            cost = len(message.content)
+            if cost > budget:
+                break
+            budget -= cost
+            kept.append(ChatMessage(role=message.role, content=message.content))
+        if len(kept) < len(history):
+            logger.info(
+                "chat_history_trimmed",
+                extra={"extra_fields": {"dropped": len(history) - len(kept)}},
+            )
+        msgs.extend(reversed(kept))
+
+    fitted, trimmed = _fit_text(user_content, budget)
+    if trimmed:
+        logger.info(
+            "chat_message_trimmed",
+            extra={"extra_fields": {"from_chars": len(user_content), "to_chars": len(fitted)}},
+        )
+    msgs.append(ChatMessage(role="user", content=fitted))
     return msgs
 
 
