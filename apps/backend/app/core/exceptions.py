@@ -133,7 +133,19 @@ def _rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRespons
 
 
 def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("unhandled_exception", extra={"extra_fields": {"path": request.url.path}})
+    # ``logger.exception`` only works inside an ``except`` block, and a FastAPI
+    # exception handler is not one, so pass the exception in explicitly.
+    logger.error(
+        "unhandled_exception",
+        exc_info=exc,
+        extra={
+            "extra_fields": {
+                "path": request.url.path,
+                "error_type": type(exc).__name__,
+                "error": str(exc) or repr(exc),
+            }
+        },
+    )
     return _json(request, 500, "internal_error", "Internal server error")
 
 

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.base import ChatMessage
 from app.ai.prompts import system_prompt
+from app.core.logging import logger
 from app.db.models import Conversation
 from app.db.repositories.conversation import ConversationRepository, MessageRepository
 from app.schemas.chat import ChatRequest, ChatResponse, ConversationCreate, MessageOut
@@ -118,16 +119,24 @@ async def _build_document_context(
         from app.db.repositories.document import DocumentRepository  # noqa: PLC0415
     except ImportError:
         return ""
-    docs = await DocumentRepository(session).list_by_ids(document_ids, only_ready=True)
-    if not docs:
+    try:
+        docs = await DocumentRepository(session).list_by_ids(document_ids, only_ready=True)
+        if not docs:
+            return ""
+        filenames = {doc.id: doc.filename for doc in docs}
+        items = await retrieve_context(
+            session,
+            document_ids=list(filenames),
+            query=query,
+            filenames=filenames,
+        )
+    except Exception:  # noqa: BLE001 - files help the answer, they must never block it
+        logger.warning(
+            "document_context_failed",
+            extra={"extra_fields": {"document_count": len(document_ids)}},
+            exc_info=True,
+        )
         return ""
-    filenames = {doc.id: doc.filename for doc in docs}
-    items = await retrieve_context(
-        session,
-        document_ids=list(filenames),
-        query=query,
-        filenames=filenames,
-    )
     body = format_context(items)
     if not body:
         return ""

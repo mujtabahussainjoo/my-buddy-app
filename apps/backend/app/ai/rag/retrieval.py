@@ -31,7 +31,13 @@ class _ChunkLike(Protocol):
 
 
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    """Split text into searchable words.
+
+    ``\\w`` is Unicode-aware, so scripts without spaces (Chinese, Japanese) and
+    accented or non-Latin alphabets are searchable too. A latin-only pattern
+    would leave such files with no tokens at all, which breaks ranking.
+    """
+    return re.findall(r"\w+", text.lower(), flags=re.UNICODE)
 
 
 def diversify_ranked(
@@ -94,9 +100,18 @@ async def retrieve_context(
     threshold = min_score if min_score is not None else settings.RETRIEVAL_MIN_SCORE
 
     corpus = [_tokenize(chunk.content) for chunk in chunks]
+    if not any(corpus):
+        # Every attached file is empty of searchable words (e.g. a file of pure
+        # symbols). Ranking needs at least one token, so answer without the
+        # files rather than failing the whole message.
+        return []
     query_tokens = _tokenize(query)
-    bm25 = BM25Okapi(corpus)
-    scores = bm25.get_scores(query_tokens)
+    try:
+        bm25 = BM25Okapi(corpus)
+        scores = bm25.get_scores(query_tokens)
+    except (ValueError, ZeroDivisionError):
+        # A ranker problem must never turn a chat message into a 500.
+        return []
     ranked = sorted(zip(chunks, scores, strict=True), key=lambda pair: pair[1], reverse=True)
     above = [(chunk, score) for chunk, score in ranked if score >= threshold]
     if not above and ranked:

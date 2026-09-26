@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
+from unittest.mock import AsyncMock
 
-from app.ai.rag.retrieval import diversify_ranked, format_context
+import pytest
+
+from app.ai.rag import retrieval
+from app.ai.rag.retrieval import _tokenize, diversify_ranked, format_context, retrieve_context
 from app.schemas.documents import RAGRetrievalItem
 
 
@@ -111,3 +116,57 @@ def test_format_context_respects_char_budget() -> None:
 
 def test_format_context_empty_items() -> None:
     assert format_context([]) == ""
+
+
+def test_tokenize_keeps_non_latin_scripts() -> None:
+    assert _tokenize("Hello 世界") == ["hello", "世界"]
+    assert _tokenize("مرحبا") == ["مرحبا"]
+
+
+def _retrieve(
+    monkeypatch: pytest.MonkeyPatch, chunks: list[FakeChunk], query: str = "hello"
+) -> list[RAGRetrievalItem]:
+    repo = AsyncMock()
+    repo.chunks_for_documents = AsyncMock(return_value=chunks)
+    monkeypatch.setattr(retrieval, "DocumentChunkRepository", lambda _session: repo)
+    return asyncio.run(retrieve_context(AsyncMock(), document_ids=[DOC_A], query=query, filenames={}))
+
+
+def test_retrieve_survives_a_file_with_no_searchable_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file made only of symbols must not break the chat message.
+
+    BM25 divides by the number of known words, so a corpus with no words at all
+    used to raise ZeroDivisionError and turn every message into a 500.
+    """
+    chunks = [_chunk(DOC_A, 0, "\U0001f389 \U0001f389 \U0001f389"), _chunk(DOC_A, 1, "????? ...")]
+
+    assert _retrieve(monkeypatch, chunks, query="hello") == []
+
+
+def test_retrieve_handles_non_latin_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Urdu/Arabic/accented text is searchable because the tokenizer is Unicode-aware."""
+    chunks = [
+        _chunk(DOC_A, 0, "\u06cc\u06c1 \u0627\u06cc\u06a9 \u0639\u0627\u0645 \u062e\u0637 \u06c1\u06d2"),
+        _chunk(DOC_A, 1, "\u06a9\u06be\u0627\u0646\u0627 \u067e\u0627\u06a9\u0633\u062a\u0627\u0646\u06cc \u06c1\u06d2"),
+        _chunk(DOC_A, 2, "\u067e\u06cc\u0631\u0633 \u0641\u0631\u0627\u0646\u0633 \u06a9\u0627 \u062f\u0627\u0631\u0627\u0644\u062d\u06a9\u0648\u0645\u062a"),
+    ]
+
+    items = _retrieve(monkeypatch, chunks, query="\u067e\u06cc\u0631\u0633")
+
+    assert [item.chunk_index for item in items] == [2]
+    assert items[0].content == chunks[2].content
+
+
+def test_retrieve_always_returns_something_for_an_attached_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Files are attached on purpose, so never return nothing for a real file.
+
+    CJK has no spaces, so a query word never equals a corpus word; retrieval falls
+    back to the leading chunks instead of dropping the file.
+    """
+    chunks = [_chunk(DOC_A, 0, "\u7b2c\u4e00\u6bb5\u5185\u5bb9"), _chunk(DOC_A, 1, "\u5df4\u9ece\u662f\u6cd5\u56fd\u9996\u90fd")]
+
+    assert _retrieve(monkeypatch, chunks, query="\u5df4\u9ece")
