@@ -93,3 +93,41 @@ def test_document_context_lists_filenames(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert "Files attached: hello.py" in context
     assert "[source: hello.py | chunk 2]" in context
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_error_logs_carry_the_reason_not_just_a_name() -> None:
+    """`app_error` alone tells you nothing; the log must say what went wrong."""
+    import logging as std_logging
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from app.core.exceptions import NotFoundError, register_exception_handlers
+    from app.core.logging import recent_logs, ring_buffer, setup_logging
+
+    setup_logging("WARNING")
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.get("/boom")
+    async def boom() -> dict[str, str]:
+        raise NotFoundError("Resource not found")
+
+    try:
+        response = TestClient(app, raise_server_exceptions=False).get("/boom")
+        assert response.status_code == 404
+
+        records = [r for r in recent_logs(min_level="WARNING", limit=20) if "boom" in str(r)]
+        assert records, "the failing path must be logged"
+        latest = records[-1]
+        assert latest["message"].startswith("app_error: ")
+        assert latest["detail"] == "Resource not found"
+        assert latest["status"] == 404
+        assert latest["code"] == "not_found"
+        assert latest["path"] == "/boom"
+    finally:
+        ring_buffer._buffer.clear()
+        std_logging.getLogger().handlers = [
+            h for h in std_logging.getLogger().handlers if h is not ring_buffer
+        ]

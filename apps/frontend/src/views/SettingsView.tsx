@@ -9,6 +9,18 @@ import {
   type ThirdPartyApi,
 } from '../lib/api';
 
+const LOG_META_FIELDS = new Set(['ts', 'level', 'logger', 'message', 'request_id', 'exc_info']);
+
+/** Everything the backend attached to a record (code, status, detail, path…). */
+function logExtras(entry: LogEntry): [string, string][] {
+  return Object.entries(entry)
+    .filter(([key, value]) => !LOG_META_FIELDS.has(key) && value !== null && value !== undefined && value !== '')
+    .map(([key, value]) => [
+      key,
+      typeof value === 'string' ? value : JSON.stringify(value),
+    ]);
+}
+
 interface ProviderForm {
   api_key: string;
   base_url: string;
@@ -1047,34 +1059,47 @@ export default function SettingsView() {
                   No {logLevel.toLowerCase()}-level records in the buffer yet.
                 </p>
               ) : (
-                logs.map((entry, idx) => (
-                  <div
-                    key={`${entry.ts}-${idx}`}
-                    className={`border-b border-mab-border/50 p-2 ${
-                      entry.level === 'ERROR' || entry.level === 'CRITICAL'
-                        ? 'text-red-300'
-                        : entry.level === 'WARNING'
-                          ? 'text-amber-300'
-                          : 'text-mab-muted'
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                      <span className="text-[10px] opacity-70">{entry.ts}</span>
-                      <span className="font-semibold">{String(entry.level ?? '').toUpperCase()}</span>
-                      <span className="opacity-70">{String(entry.logger ?? '')}</span>
-                      {entry.request_id && <span className="opacity-50">req: {entry.request_id}</span>}
+                logs.map((entry, idx) => {
+                  const extras = logExtras(entry);
+                  return (
+                    <div
+                      key={`${entry.ts}-${idx}`}
+                      className={`border-b border-mab-border/50 p-2 ${
+                        entry.level === 'ERROR' || entry.level === 'CRITICAL'
+                          ? 'text-red-300'
+                          : entry.level === 'WARNING'
+                            ? 'text-amber-300'
+                            : 'text-mab-muted'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="text-[10px] opacity-70">{entry.ts}</span>
+                        <span className="font-semibold">{String(entry.level ?? '').toUpperCase()}</span>
+                        <span className="opacity-70">{String(entry.logger ?? '')}</span>
+                        {entry.request_id && <span className="opacity-50">req: {entry.request_id}</span>}
+                      </div>
+                      <div className="mt-0.5 whitespace-pre-wrap break-words">{entry.message}</div>
+                      {extras.length > 0 && (
+                        <dl className="mt-1 space-y-0.5 text-[11px] opacity-80">
+                          {extras.map(([key, value]) => (
+                            <div key={key} className="flex gap-1.5">
+                              <dt className="shrink-0 font-semibold opacity-70">{key}:</dt>
+                              <dd className="min-w-0 break-words">{value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                      {typeof entry.exc_info === 'string' && entry.exc_info && (
+                        <details className="mt-1">
+                          <summary className="cursor-pointer opacity-70">traceback</summary>
+                          <pre className="mt-1 whitespace-pre-wrap break-words bg-black/30 p-2 text-[10px] text-red-200">
+                            {entry.exc_info}
+                          </pre>
+                        </details>
+                      )}
                     </div>
-                    <div className="mt-0.5 whitespace-pre-wrap break-words">{entry.message}</div>
-                    {typeof entry.exc_info === 'string' && entry.exc_info && (
-                      <details className="mt-1">
-                        <summary className="cursor-pointer opacity-70">traceback</summary>
-                        <pre className="mt-1 whitespace-pre-wrap break-words bg-black/30 p-2 text-[10px] text-red-200">
-                          {entry.exc_info}
-                        </pre>
-                      </details>
-                    )}
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

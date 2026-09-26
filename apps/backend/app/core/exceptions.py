@@ -109,15 +109,35 @@ def _json(request: Request, status_code: int, code: str, message: str, details: 
 
 
 def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    # Put the reason in the message itself so it is readable in a plain `docker
+    # logs` tail, not only in the admin panel's extra fields.
     logger.warning(
-        "app_error",
-        extra={"extra_fields": {"code": exc.code, "status": exc.status_code, "detail": exc.message}},
+        f"app_error: {exc.message}",
+        extra={
+            "extra_fields": {
+                "code": exc.code,
+                "status": exc.status_code,
+                "detail": exc.message,
+                "path": request.url.path,
+            }
+        },
     )
     return _json(request, exc.status_code, exc.code, exc.message, exc.details)
 
 
 def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     message = "Resource not found" if exc.status_code == 404 else str(exc.detail) or "HTTP error"
+    logger.warning(
+        f"http_error: {message}",
+        extra={
+            "extra_fields": {
+                "code": "http_error",
+                "status": exc.status_code,
+                "detail": message,
+                "path": request.url.path,
+            }
+        },
+    )
     return _json(request, exc.status_code, "http_error", message)
 
 
@@ -131,6 +151,19 @@ def _validation_exception_handler(request: Request, exc: RequestValidationError)
         }
         for err in errors
     ]
+    first = f"{details[0]['location']}: {details[0]['msg']}" if details else "Request validation failed"
+    logger.warning(
+        f"validation_error: {first}",
+        extra={
+            "extra_fields": {
+                "code": "validation_error",
+                "status": 422,
+                "detail": "Request validation failed",
+                "path": request.url.path,
+                "fields": "; ".join(f"{d['location']} ({d['msg']})" for d in details[:5]),
+            }
+        },
+    )
     return _json(request, 422, "validation_error", "Request validation failed", details)
 
 
