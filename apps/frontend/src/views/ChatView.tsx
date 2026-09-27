@@ -192,7 +192,7 @@ function ThinkingLoader({ text = 'Thinking…' }: { text?: string }) {
 }
 
 export default function ChatView() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageOut[]>([]);
@@ -207,6 +207,9 @@ export default function ChatView() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // A conversation keeps its null title; the signed-in user names it for now.
+  const defaultChatTitle = (user?.display_name || user?.email || 'New chat').trim();
 
   // Settled, non-empty turns — the transcript offered by the Export menu.
   const exportableMessages = useMemo(
@@ -500,7 +503,7 @@ export default function ChatView() {
               >
                 <div className="flex items-center justify-between">
                   <div className="truncate text-sm font-medium">
-                    {conv.title ?? 'Untitled chat'}
+                    {conv.title ?? defaultChatTitle}
                   </div>
                   <button
                     type="button"

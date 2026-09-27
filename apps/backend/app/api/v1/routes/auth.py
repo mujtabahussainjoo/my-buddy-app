@@ -22,9 +22,17 @@ from app.schemas.auth import (
     UserProfile,
 )
 from app.schemas.common import envelope
+from app.services import app_settings as app_settings_service
 from app.services import auth as auth_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.get("/public-settings", response_model=dict[str, Any])
+async def public_settings(session: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """Settings the sign-in page needs before anyone is authenticated."""
+    return envelope(await app_settings_service.get_public_settings(session))
+
 
 
 def _client_context(request: Request) -> dict[str, str | None]:

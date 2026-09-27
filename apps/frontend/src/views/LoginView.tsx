@@ -1,5 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { api } from '../lib/api';
 import { useAuth } from '../lib/store';
+
+interface PublicSettings {
+  demo_admin_login: boolean;
+}
 
 export default function LoginView() {
   const { login, register } = useAuth();
@@ -10,6 +15,22 @@ export default function LoginView() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [demoToken, setDemoToken] = useState<string | null>(null);
+  // An admin can hide the demo shortcuts; assume visible until told otherwise.
+  const [demoAdminLogin, setDemoAdminLogin] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .get<PublicSettings>('/auth/public-settings')
+      .then((settings) => {
+        if (!cancelled) setDemoAdminLogin(settings.demo_admin_login !== false);
+      })
+      // A failure here must never block signing in.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -126,14 +147,16 @@ export default function LoginView() {
         <div className="mt-6 border-t border-mab-border pt-4">
           <p className="mab-subtle mb-2 text-xs">Try it instantly:</p>
           <div className="flex gap-2">
-            <button
-              type="button"
-              className="mab-btn mab-btn-secondary mab-btn-sm flex-1"
-              disabled={Boolean(demoToken)}
-              onClick={() => tryDemo('admin')}
-            >
-              {demoToken === 'admin' ? 'Signing in…' : 'Admin demo'}
-            </button>
+            {demoAdminLogin && (
+              <button
+                type="button"
+                className="mab-btn mab-btn-secondary mab-btn-sm flex-1"
+                disabled={Boolean(demoToken)}
+                onClick={() => tryDemo('admin')}
+              >
+                {demoToken === 'admin' ? 'Signing in…' : 'Admin demo'}
+              </button>
+            )}
             <button
               type="button"
               className="mab-btn mab-btn-secondary mab-btn-sm flex-1"

@@ -52,6 +52,10 @@ interface AdminEditForm {
   is_active: boolean;
 }
 
+interface PublicSettings {
+  demo_admin_login: boolean;
+}
+
 function emptyForm(): ProviderForm {
   return { api_key: '', base_url: '', default_model: '', model_chat: '' };
 }
@@ -114,6 +118,10 @@ export default function SettingsView() {
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<AdminEditForm>(() => emptyEditForm());
   const [editSaving, setEditSaving] = useState(false);
+
+  const [demoAdminLogin, setDemoAdminLogin] = useState(true);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
   const isAdmin = (user?.roles ?? []).includes('admin');
 
@@ -249,6 +257,36 @@ export default function SettingsView() {
     }
   };
 
+  const loadAppSettings = async () => {
+    if (!token || !isAdmin) return;
+    try {
+      const current = await api.get<PublicSettings>('/admin/settings', token);
+      setDemoAdminLogin(current.demo_admin_login !== false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load app settings');
+    }
+  };
+
+  const saveDemoAdminLogin = async (enabled: boolean) => {
+    if (!token || !isAdmin) return;
+    setSettingsSaving(true);
+    setSettingsSaved(null);
+    setError(null);
+    try {
+      const updated = await api.patch<PublicSettings>(
+        '/admin/settings',
+        { demo_admin_login: enabled },
+        token,
+      );
+      setDemoAdminLogin(updated.demo_admin_login !== false);
+      setSettingsSaved('Saved — the sign-in page updates immediately.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save the setting');
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
   useEffect(() => {
     if (!token) return;
     api
@@ -260,6 +298,10 @@ export default function SettingsView() {
 
   useEffect(() => {
     if (token && isAdmin) void loadLogs();
+  }, [token, isAdmin]);
+
+  useEffect(() => {
+    if (token && isAdmin) void loadAppSettings();
   }, [token, isAdmin]);
 
   useEffect(() => {
@@ -1013,6 +1055,47 @@ export default function SettingsView() {
                 )
               )
             )}
+          </div>
+        </section>
+      )}
+
+      {isAdmin && (
+        <section className="mt-10 max-w-3xl">
+          <h2 className="mab-heading mb-1 text-lg">Access &amp; sign-in</h2>
+          <p className="mab-subtle mb-3 text-sm">
+            Controls what the sign-in page offers before anyone has logged in.
+          </p>
+
+          <div className="mab-panel rounded-xl border border-mab-border p-4">
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                className="mt-1 h-4 w-4"
+                checked={demoAdminLogin}
+                disabled={settingsSaving}
+                onChange={(e) => void saveDemoAdminLogin(e.target.checked)}
+              />
+              <span>
+                <span className="block text-sm font-medium">Show the “Admin demo” button</span>
+                <span className="mab-subtle block text-xs">
+                  Adds a one-click sign-in as the demo administrator ({'{'}admin@myaibuddy.dev{'}'})
+                  on the sign-in page. Turn it off to hide the shortcut — the account itself still
+                  works if someone types its credentials.
+                </span>
+              </span>
+            </label>
+
+            <div className="mt-3 flex items-center gap-3">
+              <button
+                type="button"
+                className="mab-btn mab-btn-secondary mab-btn-sm"
+                onClick={() => void saveDemoAdminLogin(!demoAdminLogin)}
+                disabled={settingsSaving}
+              >
+                {settingsSaving ? 'Saving…' : demoAdminLogin ? 'Disable' : 'Enable'}
+              </button>
+              {settingsSaved && <span className="text-xs text-mab-muted">{settingsSaved}</span>}
+            </div>
           </div>
         </section>
       )}

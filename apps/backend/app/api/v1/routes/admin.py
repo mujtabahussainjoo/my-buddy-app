@@ -17,6 +17,7 @@ from app.db.models import User
 from app.db.repositories.user import RoleRepository, UserRepository
 from app.db.session import get_db
 from app.schemas.common import envelope
+from app.services import app_settings as app_settings_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -213,3 +214,36 @@ async def update_user(
     await db.commit()
     await db.refresh(target)
     return envelope(AdminUserOut.model_validate(target).model_dump(mode="json"))
+
+
+# ── Application settings ────────────────────────────────────────────────────
+
+
+class PublicSettingsUpdate(BaseModel):
+    demo_admin_login: bool = Field(
+        description="Show the “Admin demo” shortcut button on the sign-in page.",
+    )
+
+
+@router.get("/settings", response_model=dict[str, Any])
+async def read_public_settings(
+    _: Any = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the runtime settings an admin can change (admin only)."""
+    return envelope(await app_settings_service.get_public_settings(db))
+
+
+@router.patch("/settings", response_model=dict[str, Any])
+async def patch_public_settings(
+    body: PublicSettingsUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Update the runtime settings; only the supplied keys change."""
+    updated = await app_settings_service.update_public_settings(
+        db,
+        {"demo_admin_login": body.demo_admin_login},
+        updated_by=current_user.id,
+    )
+    return envelope(updated)
